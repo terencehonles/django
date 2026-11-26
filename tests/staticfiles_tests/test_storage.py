@@ -326,6 +326,65 @@ class TestHashedFiles:
             self.assertIn(source_map_data_uri, content)
         self.assertPostCondition()
 
+    @override_settings(
+        STATICFILES_DIRS=[os.path.join(TEST_ROOT, "project", "faulty_source_maps")],
+        STATICFILES_FINDERS=["django.contrib.staticfiles.finders.FileSystemFinder"],
+    )
+    def test_css_source_map_missing(self):
+        finders.get_finder.cache_clear()
+        err = StringIO()
+        with self.assertRaises(CommandError) as cm:
+            call_command(
+                "collectstatic",
+                ignore_patterns=["*.js"],
+                interactive=False,
+                verbosity=0,
+                stderr=err,
+            )
+        self.assertEqual("Post-processing 'faulty.css' failed!\n\n", err.getvalue())
+        self.assertIsInstance(cm.exception.__cause__, ValueError)
+        exc_message = str(cm.exception)
+        self.assertIn("faulty.css", exc_message)
+        self.assertIn("faulty.css.map", exc_message)
+        self.assertIn("4:", exc_message)  # line 4 reported
+        self.assertPostCondition()
+
+    @override_settings(
+        STATICFILES_DIRS=[os.path.join(TEST_ROOT, "project", "faulty_source_maps")],
+        STATICFILES_FINDERS=["django.contrib.staticfiles.finders.FileSystemFinder"],
+    )
+    def test_css_source_map_missing_allowed(self):
+        finders.get_finder.cache_clear()
+        out = StringIO()
+        err = StringIO()
+        call_command(
+            "collectstatic",
+            ignore_missing_source_maps=True,
+            ignore_patterns=["*.js"],
+            interactive=False,
+            verbosity=1,
+            stderr=err,
+            stdout=out,
+        )
+
+        expected = "".join(
+            (Path(settings.STATICFILES_DIRS[0]) / "faulty.css")
+            .read_text()
+            .splitlines(keepends=True)[:-1]
+            + ["\n"]  # the last line is truncated and not removed
+        )
+        relpath = self.hashed_file_path("faulty.css")
+        with storage.staticfiles_storage.open(relpath, "rt") as relfile:
+            content = relfile.read()
+            self.assertEqual(content, expected)
+
+        self.assertEqual('', err.getvalue())
+        self.assertIn("Ignoring post-processing error:", out.getvalue())
+        self.assertIn("faulty.css", out.getvalue())
+        self.assertIn("faulty.css.map", out.getvalue())
+        self.assertIn("4:", out.getvalue())  # line 4 reported
+        self.assertPostCondition()
+
     def test_js_source_map(self):
         relpath = self.hashed_file_path("cached/source_map.js")
         self.assertEqual(relpath, "cached/source_map.cd45b8534a87.js")
@@ -374,6 +433,65 @@ class TestHashedFiles:
                 b"eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIl9zcmMv"
             )
             self.assertIn(source_map_data_uri, content)
+        self.assertPostCondition()
+
+    @override_settings(
+        STATICFILES_DIRS=[os.path.join(TEST_ROOT, "project", "faulty_source_maps")],
+        STATICFILES_FINDERS=["django.contrib.staticfiles.finders.FileSystemFinder"],
+    )
+    def test_js_source_map_missing(self):
+        finders.get_finder.cache_clear()
+        err = StringIO()
+        with self.assertRaises(CommandError) as cm:
+            call_command(
+                "collectstatic",
+                ignore_patterns=["*.css"],
+                interactive=False,
+                verbosity=0,
+                stderr=err,
+            )
+        self.assertEqual("Post-processing 'faulty.js' failed!\n\n", err.getvalue())
+        self.assertIsInstance(cm.exception.__cause__, ValueError)
+        exc_message = str(cm.exception)
+        self.assertIn("faulty.js", exc_message)
+        self.assertIn("faulty.js.map", exc_message)
+        self.assertIn("4:", exc_message)  # line 4 reported
+        self.assertPostCondition()
+
+    @override_settings(
+        STATICFILES_DIRS=[os.path.join(TEST_ROOT, "project", "faulty_source_maps")],
+        STATICFILES_FINDERS=["django.contrib.staticfiles.finders.FileSystemFinder"],
+    )
+    def test_js_source_map_missing_allowed(self):
+        finders.get_finder.cache_clear()
+        out = StringIO()
+        err = StringIO()
+        call_command(
+            "collectstatic",
+            ignore_missing_source_maps=True,
+            ignore_patterns=["*.css"],
+            interactive=False,
+            verbosity=1,
+            stderr=err,
+            stdout=out,
+        )
+
+        expected = "".join(
+            (Path(settings.STATICFILES_DIRS[0]) / "faulty.js")
+            .read_text()
+            .splitlines(keepends=True)[:-1]
+            + ["\n"]  # the last line is truncated and not removed
+        )
+        relpath = self.hashed_file_path("faulty.js")
+        with storage.staticfiles_storage.open(relpath, "rt") as relfile:
+            content = relfile.read()
+            self.assertEqual(content, expected)
+
+        self.assertEqual('', err.getvalue())
+        self.assertIn("Ignoring post-processing error:", out.getvalue())
+        self.assertIn("faulty.js", out.getvalue())
+        self.assertIn("faulty.js.map", out.getvalue())
+        self.assertIn("4:", out.getvalue())  # line 4 reported
         self.assertPostCondition()
 
     @override_settings(

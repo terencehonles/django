@@ -63,6 +63,12 @@ class Command(BaseCommand):
             "pattern. Use multiple times to ignore more.",
         )
         parser.add_argument(
+            "--ignore-missing-source-maps",
+            action="store_true",
+            dest="ignore_missing_source_maps",
+            help="Ignore missing source maps during post processing.",
+        )
+        parser.add_argument(
             "-n",
             "--dry-run",
             action="store_true",
@@ -100,6 +106,9 @@ class Command(BaseCommand):
         self.symlink = options["link"]
         self.clear = options["clear"]
         self.dry_run = options["dry_run"]
+        self.ignore_missing_source_maps = bool(
+            options.get("ignore_missing_source_maps")
+        )
         ignore_patterns = options["ignore_patterns"]
         if options["use_default_ignore_patterns"]:
             ignore_patterns += apps.get_app_config("staticfiles").ignore_patterns
@@ -147,7 +156,11 @@ class Command(BaseCommand):
 
         # Storage backends may define a post_process() method.
         if self.post_process and hasattr(self.storage, "post_process"):
-            processor = self.storage.post_process(found_files, dry_run=self.dry_run)
+            processor = self.storage.post_process(
+                found_files,
+                dry_run=self.dry_run,
+                ignore_missing_source_maps=self.ignore_missing_source_maps,
+            )
             for original_path, processed_path, processed in processor:
                 if isinstance(processed, Exception):
                     self.stderr.write("Post-processing '%s' failed!" % original_path)
@@ -167,6 +180,16 @@ class Command(BaseCommand):
                     self.post_processed_files.append(original_path)
                 else:
                     self.log("Skipped post-processing '%s'" % original_path)
+
+            if hasattr(self.storage, "post_processor_warnings"):
+                for name in sorted(self.storage.post_processor_warnings.keys()):
+                    for error in self.storage.post_processor_warnings[name]:
+                        message = str(error)
+                        if hasattr(error, "__notes__"):
+                            message += "\n" + "\n".join(error.__notes__)
+                        self.log(
+                            "Ignoring post-processing error: '%s'" % message, level=1
+                        )
 
         return {
             "modified": self.copied_files + self.symlinked_files,

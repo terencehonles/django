@@ -2,6 +2,8 @@ import json
 import os
 import posixpath
 import re
+from collections import defaultdict
+from enum import StrEnum
 from hashlib import md5
 from urllib.parse import unquote, urldefrag, urlsplit, urlunsplit
 
@@ -29,6 +31,10 @@ _js_ignored_re = _lazy_re_compile(
     r"|`(?:[^`\\]|\\.)*`",  # template literal
     re.DOTALL,
 )
+
+
+class PostProcessingPattern(StrEnum):
+    SOURCE_MAP = "source-map"
 
 
 class StaticFilesStorage(FileSystemStorage):
@@ -107,6 +113,7 @@ class HashedFilesMixin:
                 (
                     r"""(?P<matched>@import\s*["']\s*(?P<url>.*?)["'])""",
                     """@import url("%(url)s")""",
+                    _css_ignored_re,
                 ),
                 (
                     (
@@ -114,6 +121,8 @@ class HashedFilesMixin:
                         r"(?-i:sourceMappingURL)=(?P<url>.*)[ \t]*\*/)$"
                     ),
                     "/*# sourceMappingURL=%(url)s */",
+                    _css_ignored_re,
+                    PostProcessingPattern.SOURCE_MAP,
                 ),
             ),
         ),
@@ -124,11 +133,13 @@ class HashedFilesMixin:
                     r"(?m)^(?P<matched>//# (?-i:sourceMappingURL)=(?P<url>.*))$",
                     "//# sourceMappingURL=%(url)s",
                     _js_ignored_re,
+                    PostProcessingPattern.SOURCE_MAP,
                 ),
             ),
         ),
     )
     keep_intermediate_files = True
+    post_processor_warnings = defaultdict(list)
 
     def __init__(self, *args, **kwargs):
         if self.support_js_module_import_aggregation:
@@ -139,17 +150,22 @@ class HashedFilesMixin:
         for extension, patterns in self.patterns:
             for pattern in patterns:
                 if isinstance(pattern, (tuple, list)):
-                    if len(pattern) == 3:
+                    if len(pattern) == 4:
+                        pattern, template, ignored_re, pattern_type = pattern
+                    elif len(pattern) == 3:
                         pattern, template, ignored_re = pattern
+                        pattern_type = None
                     else:
                         pattern, template = pattern
                         ignored_re = _css_ignored_re
+                        pattern_type = None
                 else:
                     template = self.default_template
                     ignored_re = _css_ignored_re
+                    pattern_type = None
                 compiled = re.compile(pattern, re.IGNORECASE)
                 self._patterns.setdefault(extension, []).append(
-                    (compiled, template, ignored_re)
+                    (compiled, template, ignored_re, pattern_type)
                 )
 
     def file_hash(self, name, content=None):
@@ -251,7 +267,15 @@ class HashedFilesMixin:
                 return False
         return False
 
-    def url_converter(self, name, hashed_files, template=None, ignored_blocks=None):
+    def url_converter(
+        self,
+        name,
+        hashed_files,
+        template=None,
+        ignored_blocks=None,
+        pattern_type=None,
+        ignore_missing_source_maps=False,
+    ):
         """
         Return the custom URL converter for the given file name.
         """
@@ -325,6 +349,14 @@ class HashedFilesMixin:
                 line = _line_at_position(matchobj.string, matchobj.start())
                 note = f"{name!r} contains this reference {matched!r} on line {line}"
                 exc.add_note(note)
+
+                if (
+                    pattern_type == PostProcessingPattern.SOURCE_MAP
+                    and ignore_missing_source_maps
+                ):
+                    self.post_processor_warnings[name].append(exc)
+                    return ""
+
                 raise exc
 
             transformed_url = "/".join(
@@ -341,7 +373,9 @@ class HashedFilesMixin:
 
         return converter
 
-    def post_process(self, paths, dry_run=False, **options):
+    def post_process(
+        self, paths, dry_run=False, ignore_missing_source_maps=False, **options
+    ):
         """
         Post process the given dictionary of files (called from collectstatic).
 
@@ -355,6 +389,8 @@ class HashedFilesMixin:
         If either of these are performed on a file, then that file is
         considered post-processed.
         """
+        self.post_processor_warnings.clear()
+
         # don't even dare to process the files if we're in dry run mode
         if dry_run:
             return
@@ -373,7 +409,7 @@ class HashedFilesMixin:
         # Do a single pass first. Post-process all files once, yielding not
         # adjustable files and exceptions, and collecting adjustable files.
         for name, hashed_name, processed, _ in self._post_process(
-            paths, adjustable_paths, hashed_files
+            paths, adjustable_paths, hashed_files, ignore_missing_source_maps
         ):
             if name not in adjustable_paths or isinstance(processed, Exception):
                 yield name, hashed_name, processed
@@ -385,7 +421,7 @@ class HashedFilesMixin:
         for i in range(self.max_post_process_passes):
             unresolved_paths = []
             for name, hashed_name, processed, subst in self._post_process(
-                paths, adjustable_paths, hashed_files
+                paths, adjustable_paths, hashed_files, ignore_missing_source_maps
             ):
                 # Overwrite since hashed_name may be newer.
                 processed_adjustable_paths[name] = (name, hashed_name, processed)
@@ -405,7 +441,9 @@ class HashedFilesMixin:
         # Yield adjustable files with final, hashed name.
         yield from processed_adjustable_paths.values()
 
-    def _post_process(self, paths, adjustable_paths, hashed_files):
+    def _post_process(
+        self, paths, adjustable_paths, hashed_files, ignore_missing_source_maps=False
+    ):
         # Sort the files by directory level
         def path_level(name):
             return len(name.split(os.sep))
@@ -442,9 +480,9 @@ class HashedFilesMixin:
                         yield name, None, exc, False
                     for extension, patterns in self._patterns.items():
                         if matches_patterns(path, (extension,)):
-                            if not any(p.search(content) for p, _, _ in patterns):
+                            if not any(p.search(content) for p, _, _, _ in patterns):
                                 continue
-                            for pattern, template, ignored_re in patterns:
+                            for pattern, template, ignored_re, pattern_type in patterns:
                                 converter = self.url_converter(
                                     name,
                                     hashed_files,
@@ -453,6 +491,8 @@ class HashedFilesMixin:
                                         content,
                                         ignored_re,
                                     ),
+                                    pattern_type,
+                                    ignore_missing_source_maps,
                                 )
                                 try:
                                     content = pattern.sub(converter, content)
